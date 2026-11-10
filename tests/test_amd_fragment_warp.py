@@ -26,8 +26,8 @@ def main():
          "a graphics stage running wider than 32 lanes is not told to the translator"),
         ("p.max_subgroup_size = p.warp_size_potentially_larger_than_guest ? dev.subgroup_max : 32",
          "the broadcast fallbacks do not walk the host's upper lanes"),
-        ("p.has_broken_spirv_fragment_shuffle = dev.driver_id == VK_DRIVER_ID_AMD_PROPRIETARY",
-         "AMD's proprietary driver keeps native fragment-stage shuffles"),
+        ("dev.driver_id == VK_DRIVER_ID_AMD_PROPRIETARY || dev.driver_id == VK_DRIVER_ID_MESA_RADV",
+         "AMD's proprietary driver or RADV keeps native fragment-stage shuffles"),
     ):
         if needle not in profile:
             raise SystemExit(why)
