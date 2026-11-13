@@ -1,7 +1,7 @@
 """Optional real-Vulkan offscreen presentation regression, without game data.
 
-Needs a Vulkan 1.3 device, loader and headers. The normal CI runner skips GPU
-checks; selecting this check explicitly runs it. No window/swapchain is created.
+Needs a Vulkan 1.3 device, loader and headers. The source suite skips it; CI's
+separate lavapipe job and explicit selections run it. No window/swapchain is created.
 """
 import argparse
 import os
@@ -10,6 +10,13 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+RUN_ALL_ARGS = ["--cxx", "{cxx}", "--headers", "{vulkan_headers}"]
+# (a GPU)
+RUN_ALL_SKIP = {
+    "linux": "needs a Vulkan 1.3 device for offscreen transfer/readback",
+    "windows": "needs a Vulkan 1.3 device for offscreen transfer/readback",
+}
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,6 +35,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default="g++")
     parser.add_argument("--headers", required=True, type=Path)
+    parser.add_argument("--device", help="case-insensitive device-name substring; no fallback to another device")
     args = parser.parse_args()
     source = (ROOT / "gpu/vk/vk_replay.cpp").read_text(encoding="utf-8")
     begin = source.index("    const PresentAspect aspect{", source.index("void present_image("))
@@ -48,7 +56,8 @@ def main():
         compiler = shutil.which(args.cxx)
         if compiler:
             env["PATH"] = str(Path(compiler).parent) + os.pathsep + env.get("PATH", "")
-        subprocess.run([str(exe)], env=env, check=True, timeout=60)
+        subprocess.run([str(exe)] + (["--device", args.device] if args.device is not None else []),
+                       env=env, check=True, timeout=60)
 
 
 if __name__ == "__main__":

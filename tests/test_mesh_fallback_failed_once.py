@@ -9,19 +9,12 @@ failure is now remembered by the program's key and variant, and the program's dr
 python -I -B tests/test_mesh_fallback_failed_once.py
 """
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # (tests/srccut.py: python -I leaves this folder off the path)
+from srccut import block   # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 DRAW = ROOT / "gpu" / "vk" / "vk_draw.cpp"
-
-
-def block(text, marker):
-    start = text.index(marker)
-    end = text.index("{", start) + 1
-    depth = 1
-    while depth:
-        depth += (text[end] == "{") - (text[end] == "}")
-        end += 1
-    return text[start:end]
 
 
 def main():
@@ -31,9 +24,9 @@ def main():
         raise SystemExit("fallback_compute_pipelines keeps no record of the programs that failed")
     lock = body.index("std::lock_guard lk(mu);")
     check = body.find("if (failed.count({p.key, p.variant})) return false;")
-    create = body.index("guarded_compute(")
+    create = body.index("cached_compute(")   # (the compile: guarded_compute, through the play caches)
     if check < 0 or not lock < check < create:
-        raise SystemExit("a program that failed is compiled again: the check must come under the lock, before guarded_compute")
+        raise SystemExit("a program that failed is compiled again: the check must come under the lock, before the compile")
     failure = block(body, "&made[i]); r != VK_SUCCESS) {")
     if "failed.insert({p.key, p.variant});" not in failure:
         raise SystemExit("a failed compute pipeline is not remembered")

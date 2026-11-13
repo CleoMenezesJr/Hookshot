@@ -9,18 +9,11 @@ import argparse
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # (tests/srccut.py: python -I leaves this folder off the path)
+from srccut import block   # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def block(text, marker):
-    start = text.index(marker)
-    end = text.index("{", start) + 1
-    depth = 1
-    while depth:
-        depth += (text[end] == "{") - (text[end] == "}")
-        end += 1
-    return text[start:end]
 
 
 def main():
@@ -49,6 +42,10 @@ bool begin(uint32_t, uint32_t) { calls += "b"; return can_draw; }
 void idle() { calls += "i"; }
 void record(VkCommandBuffer cmd, uint32_t index, uint32_t w, uint32_t h) { CHECK(cmd == 1 && index == 2 && w == 640 && h == 360); calls += "r"; }
 }
+namespace mkwvk::rec {   // (RX_VK_RECORDER: the boundary before each Dear ImGui recording, logged as "d")
+enum Bound { B_DIRECT };
+void boundary(Bound) { calls += "d"; }
+}
 ui::Ctx ui_ctx(uint32_t, uint32_t) { return {}; }
 void prebake(const ui::Ctx&) { calls += "p"; }
 bool resized = false;
@@ -69,7 +66,7 @@ int main() {
             CHECK(calls == "i");
             calls.clear(), resized = true;
             menu_record(1, 2, 640, 360);
-            CHECK(calls == (can ? "bpr" : "bi"));
+            CHECK(calls == (can ? "bpdr" : "bi"));
             resized = false;
             continue;
         }
@@ -78,7 +75,7 @@ int main() {
         if (startup) want += "s";
         if (menu) want += "m";
         if (fps && !startup) want += menu ? "F" : "f";
-        want += "r";
+        want += "dr";   // (the recorder boundary right before the recording)
         CHECK(calls == want);
     }
     std::printf("PASS: one ImGui frame and recording for whatever shows, in order, nothing while nothing shows\n");

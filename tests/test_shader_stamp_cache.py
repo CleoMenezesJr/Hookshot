@@ -21,7 +21,7 @@ BUILD_SCRIPT = ROOT / "nx2" / "build.py"
 
 def production_code(path):
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    names = {"tree_headers", "vk_sources", "flag_text", "object_key"}
+    names = {"tree_headers", "vk_sources", "flag_text", "object_key", "zstd_jobs"}
     functions = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     assert {n.name for n in functions} == names
     main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
@@ -48,6 +48,7 @@ class ShaderStampCacheTests(unittest.TestCase):
             "gpu/vk/vk_state.h": "struct State {};\n",
             "gpu/vk/vk_api.h": "struct Api {};\n",
             "gpu/vk/vk_dlss.cpp": "int dlss;\n",
+            "gpu/vk/vk_fsr4.cpp": "int fsr;\n",
             "gpu/vk/vk_ngx_msvc_rt.cpp": "int msvc_rt;\n",
             "host/mingw_msvc_shims.c": "int shims;\n",
             "gpu/vk/eden/translate.cpp": "int translator;\n",
@@ -81,6 +82,9 @@ class ShaderStampCacheTests(unittest.TestCase):
             "third_party/zstd/lib/decompress/zstd_ddict.c": "int z8;\n",
             "third_party/zstd/lib/decompress/zstd_decompress.c": "int z9;\n",
             "third_party/zstd/lib/decompress/zstd_decompress_block.c": "int z10;\n",
+            "third_party/zbic/zstd.c": "int zstd_zbic;\n",
+            "third_party/zbic/zstd.h": "int zstd_zbic_h;\n",
+            "third_party/zbic/zstd_errors.h": "int zstd_zbic_errors;\n",
         }
         for name, text in self.files.items():
             path = self.root / name
@@ -88,7 +92,7 @@ class ShaderStampCacheTests(unittest.TestCase):
             path.write_bytes(text.encode())
         self.code = production_code(BUILD_SCRIPT)
 
-    def jobs(self, linux, version="fixture", release=False, ngx="", mingw="llvm-mingw"):
+    def jobs(self, linux, version="fixture", release=False, ngx="", mingw="llvm-mingw", fsr=False):
         namespace = {
             "os": os, "hashlib": hashlib,
             "GPU": str(self.root / "gpu"), "POSIX": str(self.root / "host/posix"), "HOST": str(self.root / "host"),
@@ -99,7 +103,8 @@ class ShaderStampCacheTests(unittest.TestCase):
             "cpm_package": lambda name: str(self.root / "deps" / name),
             "spirv_headers": str(self.root / "deps/spirv-headers"),
             "vk_headers": str(self.root / "deps/vulkanheaders"),
-            "obj_dir": str(self.root / "obj"), "cc": "clang", "jobs": [],
+            "vma_headers": str(self.root / "deps/vulkanmemoryallocator"),
+            "obj_dir": str(self.root / "obj"), "cc": "clang", "jobs": [], "ZSTD": str(self.root / "third_party/zstd/lib"),
             "stamp_def": '-DHOOKSHOT_VERSION="%s"' % version, "logo_text": b"", "gen_dir": str(self.root / "gen"),
             "fonts_cpp": str(self.root / "gen/ui_fonts.cpp"),
             # (the back end's branch makes its logo header and fonts file itself since #1567: no files written here)
@@ -107,6 +112,7 @@ class ShaderStampCacheTests(unittest.TestCase):
             "ui_fonts": SimpleNamespace(write=lambda path: None),
             "NGX_SDK": ngx,   # ("": no NVIDIA NGX SDK, vk_dlss.cpp built without DLSS, as by default)
             "NGX_MSVC_RT": "vk_ngx_msvc_rt.cpp",
+            "FSR": fsr,   # (HOOKSHOT_FSR=1: vk_fsr4.cpp built with AMD FSR 4)
         }
         with mock.patch.dict(os.environ, {"RX_RELEASE": "1"} if release else {}, clear=True), warnings.catch_warnings():
             # The production key/header helpers use short-lived open(...).read() expressions.
@@ -158,7 +164,7 @@ class ShaderStampCacheTests(unittest.TestCase):
                 before = self.jobs(linux)
                 path.write_bytes(b"struct IR { int changed; };\n")
                 # (Dear ImGui's objects and zstd's see only their own headers; the fonts' file none)
-                expected = {name for name in before if not name.startswith(("host/posix/", "third_party/imgui/", "third_party/zstd/", "gen/"))}
+                expected = {name for name in before if not name.startswith(("host/posix/", "third_party/imgui/", "third_party/zstd/", "third_party/zbic/", "gen/"))}
                 self.assertEqual(self.changed(before, self.jobs(linux)), expected)
 
     def test_stamp_line_ending_normalization_is_unchanged(self):
@@ -179,7 +185,7 @@ class ShaderStampCacheTests(unittest.TestCase):
                     version = [f for f in job["flags"] if f.startswith("-DHOOKSHOT_VERSION=")]
                     self.assertEqual(len(shader), int(name == "gpu/vk/vk_shader.cpp"))
                     self.assertEqual(len(version), int(name == "gpu/vk/vk_menu.cpp"))
-                    if not name.startswith(("host/posix/", "third_party/zstd/", "gen/")):   # (plain C libraries, the fonts' bytes)
+                    if not name.startswith(("host/posix/", "third_party/zstd/", "third_party/zbic/", "gen/")):   # (plain C libraries, the fonts' bytes)
                         self.assertIn("-DHOOKSHOT_RELEASE", job["flags"])
                 self.assertEqual(self.changed(before, self.jobs(linux, version="new", release=True)),
                                  {"gpu/vk/vk_menu.cpp"})
@@ -200,6 +206,17 @@ class ShaderStampCacheTests(unittest.TestCase):
                 self.assertEqual({n for n, j in ngx.items() if "-DHOOKSHOT_NGX" in j["flags"]},
                                  {"gpu/vk/vk_dlss.cpp"} | ({"gpu/vk/vk_ngx_msvc_rt.cpp"} if mingw and not linux else set()))
                 self.assertEqual(self.changed(plain, {n: ngx[n] for n in plain}), {"gpu/vk/vk_dlss.cpp"})
+
+    def test_fsr_reaches_only_vk_fsr4(self):
+        for linux in (False, True):
+            with self.subTest(linux=linux):
+                plain = self.jobs(linux)
+                self.assertFalse([n for n, j in plain.items() if "-DHOOKSHOT_FSR" in j["flags"]])
+                with mock.patch("builtins.print"):
+                    fsr = self.jobs(linux, fsr=True)
+                self.assertEqual(set(fsr), set(plain))   # (no other files: AMD's headers alone, nothing linked)
+                self.assertEqual({n for n, j in fsr.items() if "-DHOOKSHOT_FSR" in j["flags"]}, {"gpu/vk/vk_fsr4.cpp"})
+                self.assertEqual(self.changed(plain, fsr), {"gpu/vk/vk_fsr4.cpp"})
 
 
 class NgxSdkTests(unittest.TestCase):

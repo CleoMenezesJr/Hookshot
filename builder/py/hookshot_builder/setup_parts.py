@@ -99,6 +99,24 @@ def api_link_for(http, url):
     return None
 
 
+def list_name_ok(s, path=False):
+    """a name from the setup list (a tag, or with path a relative path with / or \\ between its parts): letters, digits and
+    . _ + - only, no ".." part, no drive, no root"""
+    if not re.fullmatch(r"[A-Za-z0-9._+\-/\\]+" if path else r"[A-Za-z0-9._+\-]+", s):
+        return False
+    names = re.split(r"[/\\]", s)
+    if len(names) > 1 and not names[-1]:   # (as in setup.c: one separator at the end is no part)
+        names.pop()
+    return all(q not in ("", ".", "..") for q in names)
+
+
+def list_ok(tag, parts):
+    """(the list's names become paths under the install folder, a folder install() removes and remakes: they stay inside it)"""
+    return list_name_ok(tag) and all(
+        re.fullmatch(r"[0-9a-f]{64}", p.sha) and p.url[:8].lower() == "https://" and (p.dest == "." or list_name_ok(p.dest, True))
+        and (p.frm == "-" or list_name_ok(p.frm)) and (p.to == "-" or list_name_ok(p.to)) for p in parts)
+
+
 def manifest_url(tag=None):
     """(an update to a named release reads THAT release's list: the latest/download link can answer with the release before it for
     a while after a publish. HOOKSHOT_SETUP_LIST=<url>: another list, for testing a release before it is the latest)"""
@@ -149,9 +167,13 @@ def read_manifest(status, tag=None, cancel=None):
         if len(p) >= 2 and p[0] == "tag":
             got_tag = p[1]
         elif len(p) == 7 and p[0] == "part":
+            if not re.fullmatch(r"[0-9]+", p[2]):
+                raise SetupError("The release's setup list could not be read. Try again later.")
             parts.append(Part(*p[1:]))
     if not got_tag or not parts:
         raise SetupError("The release's setup list could not be read. Try again later.")
+    if not list_ok(got_tag, parts):
+        raise SetupError("The release's setup list has a name this setup does not accept. Try again later.")
     if tag and tag != got_tag:
         raise SetupError("GitHub answered with the setup list of %s, not %s (its download links can lag right after a release). "
                          "Try the update again in a few minutes." % (got_tag, tag))
@@ -174,9 +196,9 @@ def reuse_part(tag, p, install):
     downloaded: that version is deleted after the install anyway"""
     rel = part_folder(p)
     was = paths.read_small(os.path.join(paths.versions(), "current.txt"))
-    if not rel or not was or was == tag:
+    if not rel or not was or was == tag or not list_name_ok(was):
         return False
-    if p.sha not in paths.read_small(os.path.join(paths.versions(), was, "parts.txt")):
+    if p.sha not in paths.read_small(os.path.join(paths.versions(), was, "parts.txt")).split():
         return False
     src, dst = os.path.join(paths.versions(), was, rel), os.path.join(install, rel)
     if not os.path.exists(src):
@@ -187,6 +209,19 @@ def reuse_part(tag, p, install):
         return True
     except OSError:
         return False
+
+
+def replace_retry(src, dst):
+    """os.replace, tried again for up to 20 s while another program (an antivirus scan, the search indexer) still holds files
+    just unpacked: Windows then refuses the move with access denied or a sharing violation. Any other error, and any error on
+    another system, is raised at once"""
+    for tries in range(1, 81):
+        try:
+            return os.replace(src, dst)
+        except PermissionError:
+            if os.name != "nt" or tries == 80:
+                raise
+        time.sleep(0.25)
 
 
 def rmtree(p):
@@ -239,16 +274,19 @@ def install(status, progress=lambda f: None, tag=None, repair=False, cancel=None
                 src, dst = os.path.join(dest, p.frm), os.path.join(dest, p.to)
                 if not os.path.exists(dst):
                     try:
-                        os.replace(src, dst)
-                    except OSError:
-                        raise SetupError("Could not set up part %d of %d (renaming %s)." % (i, n, p.frm)) from None
+                        replace_retry(src, dst)
+                    except OSError as e:
+                        held = (" Another program is holding the files just unpacked, often an antivirus scan: run the setup again, and "
+                                "if it happens again allow the folder %s in it." % paths.base()
+                                if os.name == "nt" and isinstance(e, PermissionError) else "")
+                        raise SetupError("Could not set up part %d of %d (renaming %s: %s).%s" % (i, n, p.frm, e.strerror, held)) from None
         if not os.path.isfile(os.path.join(work, "HookshotBuilder", "tools", "nx2", "make_game.py")):
             raise SetupError("The build tools are missing after unpacking. Your antivirus may have removed them: allow the folder %s "
                              "and try again." % paths.base())
         try:
-            os.replace(work, final)
-        except OSError:
-            raise SetupError("Could not finish installing into %s." % final) from None
+            replace_retry(work, final)
+        except OSError as e:
+            raise SetupError("Could not finish installing into %s (%s)." % (final, e.strerror)) from None
         paths.write_small(os.path.join(final, "installed.txt"), tag)
         write_parts(final, parts)
     elif not os.path.isfile(os.path.join(final, "parts.txt")):
